@@ -477,23 +477,23 @@ let _currentFolio = null;
 
 async function fetchConfirmadosFromSheet() {
   try {
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${SHEET_GID}`;
+    // Cache-busting: evita respuestas cacheadas del navegador
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${SHEET_GID}&t=${Date.now()}`;
     const res  = await fetch(url);
-    if (!res.ok) throw new Error('Sheet no accesible');
+    if (!res.ok) throw new Error('Sheet no accesible (HTTP ' + res.status + ')');
     const text = await res.text();
-    const json = JSON.parse(text.match(/google\.visualization\.Query\.setResponse\((.+)\)/s)[1]);
-    const cols = json.table.cols.map(c => (c.label || '').toLowerCase());
-    const colIdx       = cols.findIndex(h => h.includes('tienda'));
-    const useCol       = colIdx >= 0 ? colIdx : (COL_TIENDA - 1);
-    const colRecibieron = cols.findIndex(h => h.includes('recibieron') || h.includes('recib'));
+    const match = text.match(/google\.visualization\.Query\.setResponse\((\{[\s\S]*\})\)/);
+    if (!match) throw new Error('Formato inesperado de respuesta');
+    const json = JSON.parse(match[1]);
+    const cols = json.table.cols.map(c => (c.label || c.id || '').toLowerCase());
+    const colIdx = cols.findIndex(h => h.includes('tienda'));
+    const useCol = colIdx >= 0 ? colIdx : (COL_TIENDA - 1);
     const seen = new Set();
+    // FIX: cuenta TODAS las filas con tienda válida, sin filtrar por "recibieron"
     (json.table.rows || []).forEach(row => {
       if (!row || !row.c) return;
-      if (colRecibieron >= 0) {
-        const recVal = (row.c[colRecibieron] && row.c[colRecibieron].v) ? String(row.c[colRecibieron].v).trim() : '';
-        if (!recVal) return;
-      }
       const raw = (row.c[useCol] && row.c[useCol].v) ? String(row.c[useCol].v).trim() : '';
+      if (!raw) return;
       const normalized = ALL_TIENDAS.find(t =>
         t.toLowerCase() === raw.toLowerCase() ||
         (TIENDA_LABELS[t] || '').toLowerCase() === raw.toLowerCase()
@@ -502,11 +502,11 @@ async function fetchConfirmadosFromSheet() {
     });
     _cachedConf = [...seen];
     const dot = document.getElementById('sheet-sync-dot');
-    if (dot) { dot.style.background = '#00A36C'; dot.title = 'Sincronizado con Google Sheets'; }
+    if (dot) { dot.style.background = '#00A36C'; dot.title = 'Sincronizado ✓ (' + _cachedConf.length + ' confirmadas)'; }
   } catch(e) {
     console.warn('No se pudo leer el Sheet:', e.message);
     const dot = document.getElementById('sheet-sync-dot');
-    if (dot) { dot.style.background = '#e74c3c'; dot.title = 'Error al sincronizar'; }
+    if (dot) { dot.style.background = '#e74c3c'; dot.title = 'Error: ' + e.message; }
   }
   renderConfirmPanel();
 }
@@ -808,17 +808,20 @@ function renderPhotoGrid() {
 }
 
 async function uploadOne(foto, idx) {
-  if (!IMGBB_KEY) return null;
-  try {
-    const fd = new FormData();
-    fd.append('key',   IMGBB_KEY);
-    fd.append('image', foto.data.split(',')[1]);
-    const nombre = (_currentFolio + '-' + selectedTienda + '-f' + (idx + 1)).replace(/[^a-zA-Z0-9-]/g, '-');
-    fd.append('name', nombre);
-    const res  = await fetch('https://api.imgbb.com/1/upload', { method: 'POST', body: fd });
-    const json = await res.json();
-    return json.success ? json.data.url : null;
-  } catch { return null; }
+  if (!IMGBB_KEY) throw new Error('API key de ImgBB no configurada');
+  const fd = new FormData();
+  fd.append('key',   IMGBB_KEY);
+  fd.append('image', foto.data.split(',')[1]);
+  const nombre = (_currentFolio + '-' + selectedTienda + '-f' + (idx + 1)).replace(/[^a-zA-Z0-9-]/g, '-');
+  fd.append('name', nombre);
+  const res  = await fetch('https://api.imgbb.com/1/upload', { method: 'POST', body: fd });
+  if (!res.ok) throw new Error('ImgBB HTTP ' + res.status);
+  const json = await res.json();
+  if (!json.success) {
+    const msg = (json.error && json.error.message) ? json.error.message : JSON.stringify(json.error || json);
+    throw new Error(msg);
+  }
+  return json.data.url;
 }
 
 async function submitFotos() {
@@ -829,29 +832,44 @@ async function submitFotos() {
   if (st) { st.style.display = 'block'; st.textContent = '⏳ Subiendo fotos…'; }
 
   const urls = [];
+  let lastError = '';
   for (let i = 0; i < fotos.length; i++) {
     if (st) st.textContent = `⏳ Subiendo foto ${i+1} de ${fotos.length}…`;
-    const url = await uploadOne(fotos[i], i);
-    fotos[i].url = url;
-    urls.push(url || '(error)');
+    try {
+      const url = await uploadOne(fotos[i], i);
+      fotos[i].url = url;
+      urls.push(url);
+    } catch(e) {
+      console.error('Error foto', i+1, ':', e.message);
+      lastError = e.message;
+      fotos[i].url = null;
+      urls.push(null);
+    }
   }
 
-  const urlStr = urls.filter(u => u !== '(error)').join(' | ');
-
-  // Enviar URLs al forms (folio + fotos)
+  const validUrls = urls.filter(Boolean);
+  const urlStr    = validUrls.join(' | ');
   if (urlStr) {
     postToForms({ [FORM_ENTRIES.folio]: _currentFolio, [FORM_ENTRIES.fotos]: urlStr });
   }
 
-  if (st) st.style.display = 'none';
+  if (st) {
+    if (validUrls.length === 0 && lastError) {
+      st.style.cssText = 'display:block;background:#fff0f0;border:1px solid #f5c6cb;border-radius:10px;padding:10px 14px;font-size:12px;color:#c0392b;font-weight:700;margin-bottom:10px;';
+      st.textContent = '❌ Error al subir fotos: ' + lastError + ' — Verifica tu API key de ImgBB.';
+    } else if (lastError) {
+      st.style.cssText = 'display:block;background:#fff3cd;border:1px solid #ffc107;border-radius:10px;padding:10px 14px;font-size:12px;color:#856404;font-weight:700;margin-bottom:10px;';
+      st.textContent = `⚠️ ${validUrls.length} de ${fotos.length} fotos subidas. Error: ${lastError}`;
+    } else {
+      st.style.display = 'none';
+    }
+  }
   btn.disabled = false;
 
-  // Mostrar fotos en pantalla de éxito
   const ref = document.getElementById('success-ref');
   if (ref && urlStr) {
     ref.innerHTML += '<br>📸 Fotos: ' + urls.map((u, i) =>
-      u !== '(error)'
-        ? `<a href="${u}" target="_blank" style="color:#00785a;">Foto ${i+1}</a>`
+      u ? `<a href__="${u}" target="_blank" style="color:#00785a;">Foto ${i+1}</a>`
         : `Foto ${i+1} (error)`
     ).join(' · ');
   }
@@ -864,7 +882,6 @@ async function submitFotos() {
     ).join('');
     wrap.style.display = 'block';
   }
-
   goToPage(6);
 }
 
