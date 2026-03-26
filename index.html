@@ -229,7 +229,7 @@
   </div>
 
   <!-- PAGE 1 -->
-  <div class="page active" id="page1">
+   <div class="page active" id="page1">
     <div class="card">
       <div class="card-title"><span class="icon">🍦</span> Selecciona tu tienda</div>
       <p class="card-desc">Elige la unidad que representas para consultar el material asignado.</p>
@@ -250,68 +250,23 @@
     <button class="btn-primary" onclick="goToPage(2)" id="btn1" disabled="">Ver mi material asignado →</button>
 
     <!-- Panel de confirmados -->
-  async function loadSheet() {
-    const dot = document.getElementById('sync-dot');
-    try {
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${SHEET_GID}&t=${Date.now()}`;
-    const res  = await fetch(url);
-    const txt  = await res.text();
-    // Extraer JSON de la respuesta de Google Visualization
-    const match = txt.match(/google\.visualization\.Query\.setResponse\((\{[\s\S]*\})\)/);
-    if (!match) throw new Error('Formato inesperado');
-    const data = JSON.parse(match[1]);
-    const cols = (data.table.cols || []).map(c => (c.label || c.id || '').toLowerCase());
-
-    // Buscar columna tienda y columna recibieron
-    let colT = cols.findIndex(h => h.includes('tienda'));
-    let colR = cols.findIndex(h => h.includes('recibieron') || h.includes('recibio') || h.includes('recib'));
-    if (colT < 0) colT = 1; // fallback columna B
-
-    const seen = new Set();
-    (data.table.rows || []).forEach(row => {
-      if (!row || !row.c) return;
-      // Solo marcar confirmada si tiene valor en col recibieron (o si no existe esa col)
-      if (colR >= 0) {
-        const v = row.c[colR] && row.c[colR].v ? String(row.c[colR].v).trim() : '';
-        if (!v) return;
-      }
-      const raw = row.c[colT] && row.c[colT].v ? String(row.c[colT].v).trim() : '';
-      const found = ALL_STORES.find(s => s.toLowerCase() === raw.toLowerCase());
-      if (found) seen.add(found);
-    });
-    cachedConf = [...seen];
-    if (dot) { dot.style.background = '#00A36C'; dot.title = 'Sincronizado ✓'; }
-  } catch(err) {
-    if (dot) { dot.style.background = '#e74c3c'; dot.title = 'Sin conexión al Sheet'; }
-    console.warn('Sheet:', err.message);
-  }
-  renderPanel();
- }
-
- function renderPanel() {
-  const total = ALL_STORES.length;
-  const n     = cachedConf.length;
-  document.getElementById('confirm-count').textContent = n + ' / ' + total;
-  document.getElementById('confirm-bar').style.width   = Math.round(n / total * 100) + '%';
-  const conf  = ALL_STORES.filter(s =>  cachedConf.includes(s));
-  const pend  = ALL_STORES.filter(s => !cachedConf.includes(s));
-  document.getElementById('list-conf').innerHTML = conf.length
-    ? conf.map(s => `<span class="confirm-store-tag done">✅ ${s}</span>`).join('')
-    : '<span style="font-size:12px;color:var(--text-light)">Ninguna aún</span>';
-  document.getElementById('list-pend').innerHTML = pend.length
-    ? pend.map(s => `<span class="confirm-store-tag pending">⭐ ${s}</span>`).join('')
-    : '<span style="font-size:12px;color:#00A36C;font-weight:700">¡Todas confirmadas! 🎉</span>';
-  document.querySelectorAll('.tienda-btn').forEach(btn => {
-    const m = btn.getAttribute('onclick').match(/'([^']+)'\)/);
-    if (m) btn.classList.toggle('confirmada', cachedConf.includes(m[1]));
-  });
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  loadSheet();
-  sheetTimer = setInterval(loadSheet, 30000);
-});
-
+    <div class="confirm-panel" id="confirm-panel">
+      <div class="confirm-panel-header">
+        <div class="confirm-panel-title">📊 Estado de confirmaciones <span id="sheet-sync-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#666;margin-left:4px;vertical-align:middle;" title="Sincronizando..."></span></div>
+        <div class="confirm-panel-badge" id="confirm-panel-count">— / 11</div>
+      </div>
+      <div class="confirm-progress-bar"><div class="confirm-progress-fill" id="confirm-progress-fill" style="width:0%"></div></div>
+      <div class="confirm-cols">
+        <div class="confirm-col">
+          <div class="confirm-col-title done">✅ Ya confirmaron</div>
+          <div id="list-confirmadas" style="min-height:24px;"></div>
+        </div>
+        <div class="confirm-col">
+          <div class="confirm-col-title pending">⏳ Faltan por confirmar</div>
+          <div id="list-pendientes"></div>
+        </div>
+      </div>
+    </div>
   </div><!-- /page1 -->
 
   <!-- PAGE 2 -->
@@ -504,41 +459,39 @@ const FORM_ENTRIES = {
 const IMGBB_KEY = 'f54a9d1e0b3d89a607d638dc66ff47d7';
 
 // -- CONFIRMADOS desde Google Sheets ---------------------------
+// -- CONFIRMADOS desde Google Sheets ---------------------------
 const ALL_TIENDAS = ['Hidalgo','Universidad','Madero','Altamira','Victoria','Ejercito','Altama','Libertad','Norte','Laguna','Centro'];
 const TIENDA_LABELS = { Ejercito: 'Ejército' };
 
 const SHEET_ID  = '18qAKnIAOL5sKoOVreA3rOMk37OUPm_9PXhZQ1WFLjrM';
 const SHEET_GID = '478011660';
-const COL_TIENDA = 2;
+const COL_TIENDA = 2; // columna B — ajusta si la columna Tienda es diferente
 
 let _cachedConf = [];
 let _sheetPolling = null;
 
-// Estado global
-let selectedTienda = null;
-let receivedItems = {};
-let fotos = [];
-let _currentFolio = null;
-
 async function fetchConfirmadosFromSheet() {
   try {
-    // Cache-busting: evita respuestas cacheadas del navegador
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${SHEET_GID}&t=${Date.now()}`;
+    // gviz/tq endpoint respeta CORS y no requiere API key en Sheets públicos
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${SHEET_GID}`;
     const res  = await fetch(url);
-    if (!res.ok) throw new Error('Sheet no accesible (HTTP ' + res.status + ')');
+    if (!res.ok) throw new Error('Sheet no accesible');
     const text = await res.text();
-    const match = text.match(/google\.visualization\.Query\.setResponse\((\{[\s\S]*\})\)/);
-    if (!match) throw new Error('Formato inesperado de respuesta');
-    const json = JSON.parse(match[1]);
-    const cols = json.table.cols.map(c => (c.label || c.id || '').toLowerCase());
-    const colIdx = cols.findIndex(h => h.includes('tienda'));
-    const useCol = colIdx >= 0 ? colIdx : (COL_TIENDA - 1);
+    // Google wraps the JSON in /*O_o*/\ngoogle.visualization.Query.setResponse(...)
+    const json = JSON.parse(text.match(/google\.visualization\.Query\.setResponse\((.+)\)/s)[1]);
+    const cols = json.table.cols.map(c => (c.label || '').toLowerCase());
+    const colIdx       = cols.findIndex(h => h.includes('tienda'));
+    const useCol       = colIdx >= 0 ? colIdx : (COL_TIENDA - 1);
+    const colRecibieron = cols.findIndex(h => h.includes('recibieron') || h.includes('recib'));
     const seen = new Set();
-    // FIX: cuenta TODAS las filas con tienda válida, sin filtrar por "recibieron"
     (json.table.rows || []).forEach(row => {
       if (!row || !row.c) return;
+      // Only count if "Recibieron" column has a value
+      if (colRecibieron >= 0) {
+        const recVal = (row.c[colRecibieron] && row.c[colRecibieron].v) ? String(row.c[colRecibieron].v).trim() : '';
+        if (!recVal) return;
+      }
       const raw = (row.c[useCol] && row.c[useCol].v) ? String(row.c[useCol].v).trim() : '';
-      if (!raw) return;
       const normalized = ALL_TIENDAS.find(t =>
         t.toLowerCase() === raw.toLowerCase() ||
         (TIENDA_LABELS[t] || '').toLowerCase() === raw.toLowerCase()
@@ -547,11 +500,11 @@ async function fetchConfirmadosFromSheet() {
     });
     _cachedConf = [...seen];
     const dot = document.getElementById('sheet-sync-dot');
-    if (dot) { dot.style.background = '#00A36C'; dot.title = 'Sincronizado ✓ (' + _cachedConf.length + ' confirmadas)'; }
+    if (dot) { dot.style.background = '#00A36C'; dot.title = 'Sincronizado con Google Sheets'; }
   } catch(e) {
     console.warn('No se pudo leer el Sheet:', e.message);
     const dot = document.getElementById('sheet-sync-dot');
-    if (dot) { dot.style.background = '#e74c3c'; dot.title = 'Error: ' + e.message; }
+    if (dot) { dot.style.background = '#e74c3c'; dot.title = 'Error al sincronizar'; }
   }
   renderConfirmPanel();
 }
@@ -588,6 +541,9 @@ function renderConfirmPanel() {
   });
 }
 
+
+
+let selectedTienda = null;
 document.addEventListener('DOMContentLoaded', startSheetPolling);
 
 function selectTienda(el, name) {
@@ -608,6 +564,7 @@ function checkConfirm() {
   const nombreOk = document.getElementById('gerente-nombre').value.trim();
   const telOk    = document.getElementById('gerente-tel').value.trim();
   const cbOk     = document.getElementById('check-confirm').checked;
+  // Show "ya recibí" checkbox only after the first checkbox is checked
   const wrap = document.getElementById('check-recibio-wrap');
   if (wrap) wrap.style.display = cbOk ? 'flex' : 'none';
   document.getElementById('btn4').disabled = !(nombreOk && telOk && cbOk);
@@ -616,6 +573,9 @@ function checkConfirm() {
 function getPickup(tienda) {
   return PICKUP_INFO[PICKUP_ASIGNADO[tienda]];
 }
+
+// Tracks which items the current user has checked as received
+let receivedItems = {};
 
 function toggleReceived(tienda, key, el) {
   if (!receivedItems[tienda]) receivedItems[tienda] = {};
@@ -639,6 +599,7 @@ function toggleReceived(tienda, key, el) {
     row.style.background = '';
     if (qty) qty.style.background = '';
   }
+  // Update the recibio checkbox if all items received
   updateRecibioCheckbox(tienda);
 }
 
@@ -650,6 +611,44 @@ function updateRecibioCheckbox(tienda) {
   const cb = document.getElementById('check-recibio');
   if (cb) cb.checked = allReceived;
   checkConfirm();
+}
+
+function buildMaterialHTML(tienda) {
+  const mat = MATERIAL[tienda];
+  if (!mat) return '';
+  if (!receivedItems[tienda]) receivedItems[tienda] = {};
+  const sent = ENVIADOS[tienda] || [];
+  const cats = {};
+  for (const [key, qty] of Object.entries(mat)) {
+    const l = LABELS[key]; if (!l) continue;
+    if (!cats[l.cat]) cats[l.cat] = [];
+    cats[l.cat].push({ ...l, qty, key, isSent: sent.includes(key) });
+  }
+  let html = '';
+  for (const [cat, items] of Object.entries(cats)) {
+    html += `<div class="mat-category">${cat}</div>`;
+    for (const item of items) {
+      const isRec = receivedItems[tienda][item.key] || false;
+      const btnLabel = isRec ? '✅ Recibido' : '☐ Marcar recibido';
+      const btnStyle = isRec
+        ? 'background:#00A36C;color:#fff;border-color:#00A36C;'
+        : 'background:white;color:#5a3a4a;border-color:#f0d6e4;';
+      const rowStyle = isRec ? 'border-color:#A5D6A7;background:#F9FFF9;' : '';
+      const qtyStyle = isRec ? 'background:#2E7D32;' : '';
+      html += `<div class="mat-row" style="${rowStyle}">
+        <div style="flex:1;">
+          <div class="mat-name"><span class="mat-icon">${item.icon}</span>${item.name}</div>
+          <div class="mat-detail">${item.det}</div>
+          <button onclick="toggleReceived('${tienda}','${item.key}',this)"
+            style="margin-top:8px;padding:5px 14px;border-radius:50px;border:1.5px solid;font-size:12px;font-weight:700;cursor:pointer;transition:all 0.2s;${btnStyle}">
+            ${btnLabel}
+          </button>
+        </div>
+        <div class="mat-qty ${item.qty >= 1000 ? 'qty-many' : ''}" style="${qtyStyle}">${item.qty >= 1000 ? item.qty.toLocaleString() : item.qty}</div>
+      </div>`;
+    }
+  }
+  return html;
 }
 
 function buildMaterialHTML(tienda) {
