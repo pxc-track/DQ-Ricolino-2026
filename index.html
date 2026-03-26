@@ -250,23 +250,68 @@
     <button class="btn-primary" onclick="goToPage(2)" id="btn1" disabled="">Ver mi material asignado →</button>
 
     <!-- Panel de confirmados -->
-    <div class="confirm-panel" id="confirm-panel">
-      <div class="confirm-panel-header">
-        <div class="confirm-panel-title">📊 Estado de confirmaciones <span id="sheet-sync-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#666;margin-left:4px;vertical-align:middle;" title="Sincronizando..."></span></div>
-        <div class="confirm-panel-badge" id="confirm-panel-count">— / 11</div>
-      </div>
-      <div class="confirm-progress-bar"><div class="confirm-progress-fill" id="confirm-progress-fill" style="width:0%"></div></div>
-      <div class="confirm-cols">
-        <div class="confirm-col">
-          <div class="confirm-col-title done">✅ Ya confirmaron</div>
-          <div id="list-confirmadas" style="min-height:24px;"></div>
-        </div>
-        <div class="confirm-col">
-          <div class="confirm-col-title pending">⏳ Faltan por confirmar</div>
-          <div id="list-pendientes"></div>
-        </div>
-      </div>
-    </div>
+  async function loadSheet() {
+    const dot = document.getElementById('sync-dot');
+    try {
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${SHEET_GID}&t=${Date.now()}`;
+    const res  = await fetch(url);
+    const txt  = await res.text();
+    // Extraer JSON de la respuesta de Google Visualization
+    const match = txt.match(/google\.visualization\.Query\.setResponse\((\{[\s\S]*\})\)/);
+    if (!match) throw new Error('Formato inesperado');
+    const data = JSON.parse(match[1]);
+    const cols = (data.table.cols || []).map(c => (c.label || c.id || '').toLowerCase());
+
+    // Buscar columna tienda y columna recibieron
+    let colT = cols.findIndex(h => h.includes('tienda'));
+    let colR = cols.findIndex(h => h.includes('recibieron') || h.includes('recibio') || h.includes('recib'));
+    if (colT < 0) colT = 1; // fallback columna B
+
+    const seen = new Set();
+    (data.table.rows || []).forEach(row => {
+      if (!row || !row.c) return;
+      // Solo marcar confirmada si tiene valor en col recibieron (o si no existe esa col)
+      if (colR >= 0) {
+        const v = row.c[colR] && row.c[colR].v ? String(row.c[colR].v).trim() : '';
+        if (!v) return;
+      }
+      const raw = row.c[colT] && row.c[colT].v ? String(row.c[colT].v).trim() : '';
+      const found = ALL_STORES.find(s => s.toLowerCase() === raw.toLowerCase());
+      if (found) seen.add(found);
+    });
+    cachedConf = [...seen];
+    if (dot) { dot.style.background = '#00A36C'; dot.title = 'Sincronizado ✓'; }
+  } catch(err) {
+    if (dot) { dot.style.background = '#e74c3c'; dot.title = 'Sin conexión al Sheet'; }
+    console.warn('Sheet:', err.message);
+  }
+  renderPanel();
+ }
+
+ function renderPanel() {
+  const total = ALL_STORES.length;
+  const n     = cachedConf.length;
+  document.getElementById('confirm-count').textContent = n + ' / ' + total;
+  document.getElementById('confirm-bar').style.width   = Math.round(n / total * 100) + '%';
+  const conf  = ALL_STORES.filter(s =>  cachedConf.includes(s));
+  const pend  = ALL_STORES.filter(s => !cachedConf.includes(s));
+  document.getElementById('list-conf').innerHTML = conf.length
+    ? conf.map(s => `<span class="confirm-store-tag done">✅ ${s}</span>`).join('')
+    : '<span style="font-size:12px;color:var(--text-light)">Ninguna aún</span>';
+  document.getElementById('list-pend').innerHTML = pend.length
+    ? pend.map(s => `<span class="confirm-store-tag pending">⭐ ${s}</span>`).join('')
+    : '<span style="font-size:12px;color:#00A36C;font-weight:700">¡Todas confirmadas! 🎉</span>';
+  document.querySelectorAll('.tienda-btn').forEach(btn => {
+    const m = btn.getAttribute('onclick').match(/'([^']+)'\)/);
+    if (m) btn.classList.toggle('confirmada', cachedConf.includes(m[1]));
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadSheet();
+  sheetTimer = setInterval(loadSheet, 30000);
+});
+
   </div><!-- /page1 -->
 
   <!-- PAGE 2 -->
@@ -808,20 +853,18 @@ function renderPhotoGrid() {
 }
 
 async function uploadOne(foto, idx) {
-  if (!IMGBB_KEY) throw new Error('API key de ImgBB no configurada');
-  const fd = new FormData();
-  fd.append('key',   IMGBB_KEY);
-  fd.append('image', foto.data.split(',')[1]);
-  const nombre = (_currentFolio + '-' + selectedTienda + '-f' + (idx + 1)).replace(/[^a-zA-Z0-9-]/g, '-');
-  fd.append('name', nombre);
-  const res  = await fetch('https://api.imgbb.com/1/upload', { method: 'POST', body: fd });
-  if (!res.ok) throw new Error('ImgBB HTTP ' + res.status);
-  const json = await res.json();
-  if (!json.success) {
-    const msg = (json.error && json.error.message) ? json.error.message : JSON.stringify(json.error || json);
-    throw new Error(msg);
-  }
-  return json.data.url;
+  if (!IMGBB_KEY) return null;
+  try {
+    const fd = new FormData();
+    fd.append('key',   IMGBB_KEY);
+    fd.append('image', foto.data.split(',')[1]);
+    // Nombre = folio + tienda + índice → fácil de identificar en ImgBB
+    const nombre = (folio + '-' + tienda + '-f' + (idx+1)).replace(/[^a-zA-Z0-9-]/g,'-');
+    fd.append('name',  nombre);
+    const res  = await fetch('https://api.imgbb.com/1/upload', {method:'POST', body:fd});
+    const json = await res.json();
+    return json.success ? json.data.url : null;
+  } catch { return null; }
 }
 
 async function submitFotos() {
@@ -829,60 +872,40 @@ async function submitFotos() {
   const btn = document.getElementById('btn5');
   const st  = document.getElementById('upload-status');
   btn.disabled = true;
-  if (st) { st.style.display = 'block'; st.textContent = '⏳ Subiendo fotos…'; }
+  if (st) { st.style.display='block'; st.textContent='⏳ Subiendo fotos…'; }
 
   const urls = [];
-  let lastError = '';
   for (let i = 0; i < fotos.length; i++) {
     if (st) st.textContent = `⏳ Subiendo foto ${i+1} de ${fotos.length}…`;
-    try {
-      const url = await uploadOne(fotos[i], i);
-      fotos[i].url = url;
-      urls.push(url);
-    } catch(e) {
-      console.error('Error foto', i+1, ':', e.message);
-      lastError = e.message;
-      fotos[i].url = null;
-      urls.push(null);
-    }
+    const url = await uploadOne(fotos[i], i);
+    fotos[i].url = url;
+    urls.push(url || '(error)');
   }
 
-  const validUrls = urls.filter(Boolean);
-  const urlStr    = validUrls.join(' | ');
+  const urlStr = urls.filter(u => u !== '(error)').join(' | ');
+
+  // Enviar URLs al forms en el mismo entry (un solo POST con folio + fotos)
   if (urlStr) {
-    postToForms({ [FORM_ENTRIES.folio]: _currentFolio, [FORM_ENTRIES.fotos]: urlStr });
+    postToForms({ [E.folio]: folio, [E.fotos]: urlStr });
   }
 
-  if (st) {
-    if (validUrls.length === 0 && lastError) {
-      st.style.cssText = 'display:block;background:#fff0f0;border:1px solid #f5c6cb;border-radius:10px;padding:10px 14px;font-size:12px;color:#c0392b;font-weight:700;margin-bottom:10px;';
-      st.textContent = '❌ Error al subir fotos: ' + lastError + ' — Verifica tu API key de ImgBB.';
-    } else if (lastError) {
-      st.style.cssText = 'display:block;background:#fff3cd;border:1px solid #ffc107;border-radius:10px;padding:10px 14px;font-size:12px;color:#856404;font-weight:700;margin-bottom:10px;';
-      st.textContent = `⚠️ ${validUrls.length} de ${fotos.length} fotos subidas. Error: ${lastError}`;
-    } else {
-      st.style.display = 'none';
-    }
-  }
+  if (st) { st.style.display='none'; }
   btn.disabled = false;
 
+  // Mostrar en pantalla de éxito
   const ref = document.getElementById('success-ref');
-  if (ref && urlStr) {
-    ref.innerHTML += '<br>📸 Fotos: ' + urls.map((u, i) =>
-      u ? `<a href__="${u}" target="_blank" style="color:#00785a;">Foto ${i+1}</a>`
-        : `Foto ${i+1} (error)`
-    ).join(' · ');
-  }
+  if (ref && urlStr) ref.innerHTML += '<br>📸 Fotos: ' + urls.map((u,i) =>
+    u !== '(error)' ? `<a href="${u}" target="_blank" style="color:#00785a;">Foto ${i+1}</a>` : `Foto ${i+1} (error)`
+  ).join(' · ');
 
   const wrap = document.getElementById('success-photos');
   const grid = document.getElementById('success-grid');
   if (wrap && grid && fotos.length) {
-    grid.innerHTML = fotos.map((p, i) =>
-      `<div class="photo-thumb"><img src="${p.data}"><span class="ph-num">${i+1}</span></div>`
-    ).join('');
+    grid.innerHTML = fotos.map((p,i) => `<div class="photo-thumb"><img src="${p.data}"><span class="ph-num">${i+1}</span></div>`).join('');
     wrap.style.display = 'block';
   }
-  goToPage(6);
+
+  goToPage(6); updateSteps(6);
 }
 
 function skipFotos() {
